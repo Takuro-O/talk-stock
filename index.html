@@ -191,7 +191,7 @@ textarea.input-box { padding: 10px 12px; min-height: 80px; resize: vertical; }
       <div class="section-title">共有</div>
       <div class="card">
         <p style="font-size:13px;color:var(--c-sub);line-height:1.7;margin-bottom:12px;">
-          このページのURLを友達に送ってください。同じURLを開くだけで、同じリストがリアルタイムで両方の画面に反映されます（アカウント登録は不要です）。
+          下のURLを友達に送ってください。同じURLを開くだけで、同じリストがリアルタイムで両方の画面に反映されます（アカウント登録は不要です）。このURLを知っている人だけがリストを見られるので、SNSなどには載せないでください。
         </p>
         <div id="share-url" class="code-box" style="margin-bottom:8px;"></div>
         <button class="tappable" onclick="copyShareUrl()" style="width:100%;height:40px;background:var(--c-surface);color:var(--c-text);border:none;border-radius:var(--radius-s);font-size:14px;font-weight:600;">URLをコピー</button>
@@ -355,6 +355,28 @@ try {
   console.error('Firebase init failed', e);
 }
 
+/* ---------- 共有ルームID（推測できないランダムなID） ----------
+   データは rooms/<ルームID>/ 以下に保存します。IDは共有URLの #r=... に入っていて、
+   このURLを知っている人だけが同じリストを見られます。 */
+function genRoomId() {
+  const a = new Uint8Array(16);
+  try { crypto.getRandomValues(a); } catch (e) { for (let i = 0; i < 16; i++) a[i] = Math.floor(Math.random() * 256); }
+  return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+}
+const ROOM_KEY = 'topicStock_roomId_v1';
+function resolveRoomId() {
+  let id = '';
+  const m = /[#&]r=([A-Za-z0-9_-]{20,64})/.exec(location.hash);
+  if (m) id = m[1];
+  try { if (!id) id = localStorage.getItem(ROOM_KEY) || ''; } catch (e) {}
+  if (!id) id = genRoomId();
+  try { localStorage.setItem(ROOM_KEY, id); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname + location.search + '#r=' + id); } catch (e) {}
+  return id;
+}
+const ROOM_ID = resolveRoomId();
+const roomRef = (path) => fbDb.ref('rooms/' + ROOM_ID + (path ? '/' + path : ''));
+
 /* ---------- 基本ユーティリティ ---------- */
 const haptic = (type = 'light') => navigator.vibrate?.(type === 'heavy' ? 30 : 10);
 
@@ -427,13 +449,13 @@ function initSync() {
   }
   setSyncBanner('友達と同期中…', false);
 
-  fbDb.ref('categories').on('value', snap => {
+  roomRef('categories').on('value', snap => {
     const val = snap.val();
     if (snap.exists() && Array.isArray(val)) {
       state.categories = val;
     } else if (!snap.exists() && !_seededCategories) {
       _seededCategories = true;
-      fbDb.ref('categories').set(DEFAULT_CATEGORIES);
+      roomRef('categories').set(DEFAULT_CATEGORIES);
       state.categories = [...DEFAULT_CATEGORIES];
     }
     renderAll();
@@ -442,7 +464,7 @@ function initSync() {
     setSyncBanner('同期エラー：データベースの設定を確認してください', true);
   });
 
-  fbDb.ref('topics').on('value', snap => {
+  roomRef('topics').on('value', snap => {
     const val = snap.val() || {};
     state.topics = Object.entries(val)
       .map(([id, t]) => ({ id, ...t }))
@@ -457,16 +479,16 @@ function initSync() {
 /* ---------- CRUD ---------- */
 function addTopic(item) {
   if (!fbDb) { showToast('同期先に接続できていません', 'error'); return; }
-  fbDb.ref('topics').push({ done: false, createdAt: Date.now(), ...item })
+  roomRef('topics').push({ done: false, createdAt: Date.now(), ...item })
     .catch(() => showToast('追加に失敗しました', 'error'));
 }
 function updateTopic(id, patch) {
   if (!fbDb) return;
-  fbDb.ref('topics/' + id).update(patch).catch(() => showToast('更新に失敗しました', 'error'));
+  roomRef('topics/' + id).update(patch).catch(() => showToast('更新に失敗しました', 'error'));
 }
 function deleteTopic(id) {
   if (!fbDb) return;
-  fbDb.ref('topics/' + id).remove().catch(() => showToast('削除に失敗しました', 'error'));
+  roomRef('topics/' + id).remove().catch(() => showToast('削除に失敗しました', 'error'));
 }
 function toggleDone(id) {
   const t = state.topics.find(t => t.id === id);
@@ -476,17 +498,20 @@ function toggleDone(id) {
 }
 function setCategories(newList) {
   state.categories = newList;
-  if (fbDb) fbDb.ref('categories').set(newList).catch(() => showToast('カテゴリの更新に失敗しました', 'error'));
+  if (fbDb) roomRef('categories').set(newList).catch(() => showToast('カテゴリの更新に失敗しました', 'error'));
   renderAll();
 }
 
 /* ---------- 共有URL ---------- */
+function shareUrl() {
+  return window.location.href.split('#')[0] + '#r=' + ROOM_ID;
+}
 function refreshShareUrl() {
   const el = document.getElementById('share-url');
-  if (el) el.textContent = window.location.href.split('#')[0];
+  if (el) el.textContent = shareUrl();
 }
 async function copyShareUrl() {
-  const url = window.location.href.split('#')[0];
+  const url = shareUrl();
   try {
     await navigator.clipboard.writeText(url);
     showToast('URLをコピーしました');
@@ -761,7 +786,7 @@ function confirmClearAll() {
     title: 'すべての話題を削除しますか？',
     message: `${state.topics.length}件の話題が全員分、完全に削除されます`,
     onOk: () => {
-      if (fbDb) fbDb.ref('topics').remove().catch(() => showToast('削除に失敗しました', 'error'));
+      if (fbDb) roomRef('topics').remove().catch(() => showToast('削除に失敗しました', 'error'));
       showToast('すべて削除しました');
     }
   });
@@ -1039,7 +1064,7 @@ function migrateLegacyLocalData() {
     onOk: () => {
       legacy.topics.forEach(t => {
         if (!t || !t.title) return;
-        fbDb.ref('topics').push({
+        roomRef('topics').push({
           title: t.title,
           category: (legacy.categories || []).includes(t.category) ? t.category : DEFAULT_CATEGORIES[0],
           note: t.note || '',
@@ -1055,6 +1080,42 @@ function migrateLegacyLocalData() {
   });
 }
 
+/* 旧バージョン（保存先がURL共通だった頃）のデータを、新しい共有リストへ引き継ぐ。
+   旧データはルールを閉じた後は読めなくなるので、その場合は何もしない。 */
+function migrateLegacyRoot() {
+  const FLAG = 'topicStock_migratedRoot_v1';
+  if (!fbDb) return;
+  try { if (localStorage.getItem(FLAG) === '1') return; } catch (e) {}
+  const setFlag = () => { try { localStorage.setItem(FLAG, '1'); } catch (e) {} };
+  roomRef('topics').once('value').then(mine => {
+    if (mine.exists()) { setFlag(); return; }               // すでに新しいリストにデータがある
+    return Promise.all([fbDb.ref('topics').once('value'), fbDb.ref('categories').once('value')]).then(([oldT, oldC]) => {
+      const topics = oldT.val();
+      if (!topics || typeof topics !== 'object' || !Object.keys(topics).length) { setFlag(); return; }
+      const dlg = document.getElementById('confirm-dialog');
+      if (dlg && dlg.style.display === 'flex') return;      // 別の確認が出ている間は次回に回す
+      const count = Object.keys(topics).length;
+      showConfirm({
+        title: '以前の共有リストが見つかりました',
+        message: `以前のURLで共有していたリストに${count}件の話題があります。この新しい共有リストに引き継ぎますか？`,
+        label: '引き継ぐ',
+        tone: 'primary',
+        onOk: () => {
+          const jobs = [roomRef('topics').update(topics)];
+          const cats = oldC.val();
+          if (Array.isArray(cats) && cats.length) jobs.push(roomRef('categories').set(cats));
+          Promise.all(jobs)
+            .then(() => { setFlag(); showToast(`${count}件を引き継ぎました`); })
+            .catch(() => showToast('引き継ぎに失敗しました', 'error'));
+        }
+      });
+    });
+  }).catch(err => {
+    // ルールで旧データが読めない（＝すでに閉じてある）場合は、もう確認しない
+    if (err && err.code === 'PERMISSION_DENIED') setFlag();
+  });
+}
+
 /* ---------- ヘルパー ---------- */
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -1067,6 +1128,7 @@ setupSwipeDelegation();
 trackVisitAndIntro();
 initSync();
 migrateLegacyLocalData();
+setTimeout(migrateLegacyRoot, 1500);
 </script>
 </body>
 </html>
